@@ -1,7 +1,7 @@
 # ZVV-and-Weather
 Real Time departure times of Zurich transportation system and weather display with Wemos D1
 
-[![ZVV-and-Weather panel](resources/Panel.jpg)] (https://github.com/mrohner/ZVV-and-Weather/)
+[![ZVV-and-Weather panel](resources/Panel.JPG)] (https://github.com/mrohner/ZVV-and-Weather/)
 This panel hangs near my main door for everybody to see the next connections of near by trams, 
 buses and trains.
 In addition you get a clock, outside temperature as well as weather forecast data.
