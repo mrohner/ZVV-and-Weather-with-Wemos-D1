@@ -46,7 +46,7 @@ I also flag the Inter Regio trains with a dot on the respective Matrix display.
 
 
 ### Nextion Display
-![Nextion display](https://github.com/mrohner/ZVV-and-Weather/resources/Nextion.JPG)
+![Nextion display](https://github.com/mrohner/ZVV-and-Weather/blob/master/resources/Nextion.JPG)
 I check sunset and sunrise time in order to decide which icons to display (the ones with the moon or the sun)
 I display current weather conditions (big icon) and 4 forecast icons (smaller icons) for every two hours. e.g. current time is 10:00 you will be able to see forecast
 for 12:00, 14:00, 16:00 and 18:00
