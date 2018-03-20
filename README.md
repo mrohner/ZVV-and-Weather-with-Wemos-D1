@@ -7,7 +7,7 @@ buses and trains.
 In addition you get a clock, outside temperature as well as weather forecast data.
 All the departure times displayed are real time data from the ZVV API and do consider walking times 
 to the appropriate station. Departure times are updated every 30 seconds
-[![ZVV-and-Weather panel](https://github.com/mrohner/ZVV-and-Weather/resources/Panel.mpeg)] (https://github.com/mrohner/ZVV-and-Weather/)
+![ZVV-and-Weather video](https://github.com/mrohner/ZVV-and-Weather/blob/master/resources/video.MP4)
 
 ### Hardware requirements:
 * 1 x Wemos D1 mini
@@ -32,6 +32,7 @@ to the appropriate station. Departure times are updated every 30 seconds
 http://online.fahrplan.zvv.ch/bin/stboard.exe/dny?input=Z%C3%BCrich,+Riedgraben&dirInput=Zürich,+Hallenbad+Oerlikon&maxJourneys=2&boardType=dep&start=1&tpl=stbResult2json&time=9:32
 
 The names of the stations have to exactly match what you see when using https://online.fahrplan.zvv.ch/bin/query.exe/dn.html
+
 Umlauts have to be represented in the query by i.e ü = %C3%BC (see Wemos_get_ZVV_V2.4.ino)
 In this .ino file you find different scenarios such as:
 * Dest1 From Zürich,Riedgraben direction to Hallenbad Oerlikon. Walking time to station 6 minutes
