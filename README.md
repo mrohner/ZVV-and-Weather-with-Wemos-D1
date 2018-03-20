@@ -7,7 +7,7 @@ buses and trains.
 In addition you get a clock, outside temperature as well as weather forecast data.
 All the departure times displayed are real time data from the ZVV API and do consider walking times 
 to the appropriate station. Departure times are updated every 30 seconds
-[![ZVV-and-Weather panel](resources/Panel.mpeg)] (https://github.com/mrohner/ZVV-and-Weather/)
+[![ZVV-and-Weather panel](https://github.com/mrohner/ZVV-and-Weather/resources/Panel.mpeg)] (https://github.com/mrohner/ZVV-and-Weather/)
 
 ### Hardware requirements:
 * 1 x Wemos D1 mini
