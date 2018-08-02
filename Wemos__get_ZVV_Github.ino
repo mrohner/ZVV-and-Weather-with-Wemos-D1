@@ -1,18 +1,29 @@
 /*Pin assignments:
  * Wemos
 D0 to TX Nextion
-D1 to Base of 2N2222 over a 1K resistor (a switch for LEDs to highlight tram and bus numbers)
-D2 to OUT PIR sensor (control if lights on when movement detected)
+D1 to Base of 2N2222 over a 1K resistor (LEDs)not used
+D2 
 D4 to RX Nextion
 D5 to Pin 2 of SN74HCT125
 D7 to Pin 5 of SN74HCT125
 D8 to Pin 9 of SN74HCT125
+
+V2.6
+Replaced wunderground time with Timelib
+- Time is requested from the Linux server through MQTT
+Added Syslog facility to log errors etc to the Linux server
+Connected to MQTT
+- Switch displays off and on 
+- sends departure data to MQTT
+
+V2.5
+Replaced TimeClient with wunderground time
 */
 
 #include "WundergroundClient.h"
 #include <Ticker.h>
-#include <JsonListener.h>
-#include "TimeClient.h"
+#include <JsonListener.h> // I know two JSON libs are an overkill
+#include <ArduinoJson.h>  // Just was to lazy to change the code to fit only one.
 #include <LedControl.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
@@ -20,6 +31,10 @@ D8 to Pin 9 of SN74HCT125
 #include <ArduinoOTA.h>
 #include "ZVV.h"
 #include "Nextion.h"
+#include <TimeLib.h>
+#include <Syslog.h>
+#include <PubSubClient.h>
+
 SoftwareSerial SoftySerial(16,2); // RX, TX attached to D0, D4 on Wemos D1 mini
 NexPage page0    = NexPage(0, 0, "page0");
 NexPicture p1 = NexPicture(0, 1, "p1");
@@ -41,7 +56,7 @@ NexTouch *nex_listen_list[] =
     NULL
 };
 
-const unsigned char CH[] = { //characters to be displayed on Matrix
+const unsigned char CH[] = { //Font for LED matrices
 B00000000, 
 B00000000, 
 B00000000, 
@@ -106,14 +121,40 @@ int maxInUse = 6; // how many MAX7219 are connected
 LedControl lc=LedControl(data,clk,load,maxInUse); // define Library
 
 // Wireless settings
-const char* SSID = "xxxxxxx"; 
-const char* PASSWORD = "xxxxxxx";
+const char* SSID = "****"; 
+const char* PASSWORD = "*****";
 int downcount = 0;
+
+//MQTT Settings
+const char* mqtt_server = "192.168.178.59";
+const char* mqtt_username = "mqtt";
+const char* mqtt_password = "****";
+char* InTopic = "ZVV/in"; //subscribe to topic to be notified about
+char* TimeTopic = "Time"; //subscribe to topic to be notified about
+char* OutTopic = "domoticz/in"; 
+char* OutTopic1 = "Request/Time"; 
+const int SEVEN_IDX = 82;
+const int NINE_IDX = 83;
+const int SEVENTYFIVE_IDX = 84;
+const int BUS_R_IDX = 85;
+const int SBB_IDX = 86;
+const int ZVV_IDX = 87;
+
+// Syslog server connection info
+#define SYSLOG_SERVER "192.168.178.59"
+#define SYSLOG_PORT 514
+// This device info
+#define DEVICE_HOSTNAME "wemos33"
+#define APP_NAME "ZVV"
+// A UDP instance to let us send and receive packets over UDP
+WiFiUDP udpClient;
+// Create a new syslog instance with LOG_KERN facility
+Syslog syslog(udpClient, SYSLOG_SERVER, SYSLOG_PORT, DEVICE_HOSTNAME, APP_NAME, LOG_KERN);
+
 
 // ZVV settings
 ZVVClient ZVVClient;
 String url;
-const char* STARTS = "&boardType=dep&start=1&tpl=stbResult2json&time=";
 char* Dest1 = "/bin/stboard.exe/dny?input=Z%C3%BCrich,+Riedgraben&dirInput=Z%C3%BCrich,+Hallenbad+Oerlikon&maxJourneys=";
 char* Dest1Num ="2"; // Number of connections (Journeys) we are requesting
 char* Dest2 = "/bin/stboard.exe/dny?input=Z%C3%BCrich,+Waldgarten&dirInput=Z%C3%BCrich,+Milchbuck&maxJourneys=";
@@ -124,44 +165,54 @@ char* Dest4 = "/bin/stboard.exe/dny?input=Z%C3%BCrich,+Oerlikon+(SBB)&dirInput=Z
 char* Dest4Num ="7";
 //DestxNum cannot be greater than 10, otherwise modify the ZVV.h file
 int Number_Journeys;
+const char* STARTS = "&boardType=dep&start=1&tpl=stbResult2json&time=";
 const int Walking_time_Riedgraben = 6;
 const int Walking_time_Waldgarten = 7;
-const int Riedgraben_Oerlikon = 8; //commute time
-bool IR_train = false; // Inter Regio
+const int Riedgraben_Oerlikon = 8; 
+bool IR_train = false; 
 int cur_h, cur_m, connection;
 int dep_h,dep_m;
 int countdown_figure = 0;
+int Bus75 = 0;
+int BusRiedgraben = 0;
+int Tram7 = 0;
+int Tram9 = 0;
+int TrainOe = 0;
 
 // Timing
-TimeClient TimeClient(1);
-bool readyForTimeUpdate = true;
+volatile int WDTCount = 0;
+bool SyncNecessary = true;
+time_t prevDisplay = 0; // when the digital clock was displayed
+time_t t;
+time_t lastMsg = 0;
+const int INTERVAL = 600; // 10 mins = 600
 bool readyForZVVUpdate = true;
 bool readyForWeatherUpdate = true;
 bool readyForForecastUpdate = true;
 bool readyForSunsetUpdate = true;
-Ticker Timeticker;
 Ticker ZVVticker;
 Ticker Weatherticker;
 Ticker Forecastticker;
 Ticker SecondTick; // to stabilize execution
-volatile int WDTCount = 0;
+Ticker PublishTick;
 
 // Weather
 const boolean IS_METRIC = true;
-const String WUNDERGRROUND_API_KEY = "xxxxxxx";
+const String WUNDERGRROUND_API_KEY = "*****";
 const String WUNDERGRROUND_LANGUAGE = "EN";
-const String WUNDERGROUND_STATION_ID = "IZRICH31"; // Change to a station close to you
+const String WUNDERGROUND_STATION_ID = "IZURICH188";
 const String WUNDERGROUND_COUNTRY = "CH";
 const String WUNDERGROUND_CITY = "Zurich";
 WundergroundClient wunderground(IS_METRIC);
 
 // Light
-const int LIGHTPIN = 5;
-bool lights_on = false;
+bool lights_on = true;
+bool old_lights_on = true;
 
-// PIR sensor
-const int PIRPin = 4;
-volatile bool move_on = false;
+WiFiClient espClient;
+const int httpPort = 80;
+PubSubClient client(espClient);
+int counter = 0;
 
 
 void setup() {
@@ -180,34 +231,17 @@ void setup() {
   }
   lc.setIntensity(2,5); //Intensity for 7-segment display
   nexInit(); // Initialize Nextion display
-  Serial.println();
-  Serial.println();
-  Serial.print(F("Connecting to "));
-  Serial.println(SSID);
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(SSID, PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println(F("WiFi connected"));  
-  Serial.println(F("IP address: "));
-  Serial.println(WiFi.localIP());
-  delay(5000);
-  Timeticker.attach(599, setReadyForTimeUpdate);        // Update every 10 minutes
-  ZVVticker.attach(30, setReadyForZVVUpdate);           // Update every 30 secs
+  setup_wifi();
+
+  client.setServer(mqtt_server, 8883);
+  client.setCallback(callback);
+  
+  //delay(5000);
+  ZVVticker.attach(60, setReadyForZVVUpdate);           // Update every 60 secs
   Weatherticker.attach(481, setReadyForWeatherUpdate);  // Update every 8 minutes
   Forecastticker.attach(1801, setReadyForForecastUpdate); // Update every 30 minutes
-  SecondTick.attach(1,ISRwatchdog);
-
-// Lights
-pinMode (LIGHTPIN,OUTPUT);
-digitalWrite(LIGHTPIN, LOW); 
-
-// PIR sensor
-pinMode (PIRPin,INPUT); 
+  SecondTick.attach(1,ISRwatchdog); //every second
+  PublishTick.attach(600,Publish_Status); //every 10 minutes
 
 //OTA
   // Port defaults to 8266
@@ -215,7 +249,7 @@ pinMode (PIRPin,INPUT);
   // Hostname defaults to esp8266-[ChipID]
   ArduinoOTA.setHostname("Wemos33-ZVV");
   // No authentication by default
-  ArduinoOTA.setPassword((const char *)"xxx");
+  ArduinoOTA.setPassword((const char *)"***");
   ArduinoOTA.onStart([]() {
     Serial.println("Start");
   });
@@ -239,29 +273,109 @@ pinMode (PIRPin,INPUT);
 }
 
 
-WiFiClient client;
-const int httpPort = 80;
-
-
 void loop (){
+  if (!client.connected()) reconnect();
+  if (now() > (t + 82800)) setReadyForClockUpdate();
   nexLoop(nex_listen_list);
-  if (readyForTimeUpdate) updateTime();
-  ArduinoOTA.handle();
-  lightcontrol();
-  WDTCount = 0;
-  if (readyForSunsetUpdate) updateSunset();
-  ArduinoOTA.handle();
-  if (readyForZVVUpdate) updateZVV();
-  WDTCount = 0;
-  ArduinoOTA.handle();
-  if (readyForWeatherUpdate) updateWeather();
-  WDTCount = 0;
-  lightcontrol();
-  ArduinoOTA.handle();
-  if (readyForForecastUpdate) updateForecast();
-  lightcontrol();
-  WDTCount = 0;
+  client.loop();
+  if (SyncNecessary == false) {
+    displayTime();
+    if (readyForZVVUpdate) updateZVV();
+    wait(1);
+    if (readyForSunsetUpdate) updateSunset();
+    wait(1);
+    if (readyForWeatherUpdate) updateWeather();
+    wait(1);
+    if (readyForForecastUpdate) updateForecast();
+    }
+ wait(1);
 }
+
+
+void setup_wifi() {
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA); 
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(SSID);
+
+  WiFi.begin(SSID, PASSWORD);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+  delay(500);
+}
+
+
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect("ZVVClient",mqtt_username,mqtt_password)) {
+      Serial.println("connected");
+      counter = 0;
+      // Once connected, publish an announcement...
+      // ... and resubscribe
+      client.subscribe(InTopic);
+      delay(10);
+      client.subscribe(TimeTopic);
+      client.publish(OutTopic1,"1");
+      delay(10);
+      Publish_Status();
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in .3 seconds");
+      ++counter;
+      if (counter > 180) ESP.reset();
+      // Wait 0.3 seconds before retrying
+      ArduinoOTA.handle();
+      wait(300);
+    }
+  }
+}
+
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  StaticJsonBuffer<500> jsonBuffer;
+  JsonObject& root = jsonBuffer.parseObject((char*)payload);
+    int idx = root["idx"]; // 34
+    int nvalue = root["nvalue"]; // request: 0 = open, 1 = closed
+    int day_from_system = root["day"]; // 9
+    int month_from_system = root["month"]; // 11
+    int year_from_system = root["year"]; // 2017
+    int hour_from_system = root["hour"]; // 16
+    int minutes_from_system = root["minutes"]; // 29
+    int seconds_from_system = root["seconds"]; // 26
+
+    String what = String(nvalue);
+    if (day_from_system && SyncNecessary || timeStatus() == timeNotSet) {
+      setTime(hour_from_system,minutes_from_system,seconds_from_system,day_from_system,month_from_system,year_from_system); // alternative to above, yr is 2 or 4 digit yr
+      Serial.println(F("Setting Time"));
+      SyncNecessary = false;
+      t = now();
+      do wait(1);          // wait for clock to be at 0 secs
+      while (second() != 0);
+      }
+    if (idx == ZVV_IDX) {
+      if (nvalue == 1) light_on();
+      else light_off();
+      if (lights_on != old_lights_on) {
+        publish(ZVV_IDX,lights_on,0);
+        old_lights_on = lights_on;
+      }
+    }
+}  
 
 
 void updateZVV() {
@@ -270,7 +384,7 @@ void updateZVV() {
  int tint = 0;
  int i = -1;
  Serial.println(F("------------------------------------------------------------------------------"));
- // Departure Waldgarten Bus
+ // Departure Waldgarten Bus75
  depart(Walking_time_Waldgarten, Dest3, Dest3Num);
  Serial.println("Bus: 75");
  ZVVClient.doUpdate(url);
@@ -278,6 +392,10 @@ void updateZVV() {
  Serial.print(F("countdown: "));
  Serial.println(countdown_figure);
  Serial.println();
+ if (Bus75 != countdown_figure) {
+  Bus75 = countdown_figure;
+  publish(SEVENTYFIVE_IDX,0,Bus75);
+ }
  displayChar(countdown_figure,3);
 
  // Departure Riedgraben Buses
@@ -289,6 +407,10 @@ void updateZVV() {
  Serial.println(countdown_figure);
  Serial.println();
  connection = countdown_figure;
+ if (BusRiedgraben != countdown_figure) {
+  BusRiedgraben = countdown_figure;
+  publish(BUS_R_IDX,0,BusRiedgraben);
+ }
  displayChar(countdown_figure,1);
 
 // Departure Oerlikon SBB
@@ -310,6 +432,10 @@ void updateZVV() {
      } 
    } while (trams_found < 1 && i < Number_Journeys -1);
  displayChar(ZVVClient.getCountdown(i),0);
+ if (TrainOe != ZVVClient.getCountdown(i)) {
+   TrainOe = ZVVClient.getCountdown(i);
+   publish(SBB_IDX,0,TrainOe);
+   }
  IR_train = false;
  i = -1;
  trams_found = 0;
@@ -326,8 +452,20 @@ void updateZVV() {
      Serial.println(tint);
      Serial.print(F("countdown: "));
      Serial.println(ZVVClient.getCountdown(i));
-     if (tint == 7) displayChar(ZVVClient.getCountdown(i),5);
-     else displayChar(ZVVClient.getCountdown(i),4);
+     if (tint == 7) { 
+      displayChar(ZVVClient.getCountdown(i),5);
+      if (Tram7 != ZVVClient.getCountdown(i)) {
+        Tram7 = ZVVClient.getCountdown(i);
+        publish(SEVEN_IDX,0,Tram7);
+      }
+     }
+     else {
+      displayChar(ZVVClient.getCountdown(i),4);
+      if (Tram9 != ZVVClient.getCountdown(i)) {
+        Tram9 = ZVVClient.getCountdown(i);
+        publish(NINE_IDX,0,Tram9);
+      }
+     }
      last_tram = tint;
      trams_found++;
      }
@@ -341,18 +479,15 @@ void updateZVV() {
 
 
 void depart(int walking_time, char* Dest, char* Num){
-  displayTime();
-  lightcontrol();
-  ArduinoOTA.handle();
   String dep_time = "";
   Number_Journeys = atoi(Num);
-  dep_h=(TimeClient.getHours().toInt());
-  dep_m=(TimeClient.getMinutes().toInt())+walking_time;
+  dep_h = hour();
+  dep_m = minute()+walking_time;
   if(dep_m >= 60){
     dep_m =  dep_m % 60;
     dep_h++;
   }
-  if ((TimeClient.getHours().toInt()) == 24 && dep_h == 24) dep_h = 0;
+  if (hour() == 24 && dep_h == 24) dep_h = 0;
   if (dep_h < 10) dep_time = "0";
   dep_time += String(dep_h) + ":";
   if (dep_m < 10) dep_time += "0";
@@ -400,31 +535,22 @@ void displayChar(int departure_time, int display_Matrix_Number){
 }
 
 
-void setReadyForTimeUpdate() {
-  readyForTimeUpdate = true;
-}
-
-
-void updateTime() {
-  TimeClient.updateTime();
-  if (TimeClient.getHours().toInt() == 1 && TimeClient.getMinutes().toInt() < 12) readyForSunsetUpdate = true;
-  readyForTimeUpdate = false;
-}
-
-
 void displayTime() {
-  lc.setChar(2,0,TimeClient.getMinutes()[1],false); //Display minutes
-  lc.setChar(2,1,TimeClient.getMinutes()[0],false);
-  lc.setChar(2,2,TimeClient.getHours()[1],true);
-  if ((TimeClient.getHours().toInt()) > 9) lc.setChar(2,3,TimeClient.getHours()[0],false);
+  lc.setChar(2,0,minute()%10,false); //Display minutes
+  lc.setChar(2,1,minute()/10,false);
+  lc.setChar(2,2,hour()%10,true);
+  if (hour() > 9) lc.setChar(2,3,hour()/10,false);
   else lc.setChar(2,3,' ',false);
 }
 
 
+void setReadyForClockUpdate() {
+  SyncNecessary = true;  
+}
+
 void setReadyForZVVUpdate() {
   readyForZVVUpdate = true;  
 }
-
 
 void setReadyForWeatherUpdate() {
   readyForWeatherUpdate = true;  
@@ -433,6 +559,7 @@ void setReadyForWeatherUpdate() {
 
 void updateWeather() {
   wunderground.updateConditions(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_STATION_ID);
+  if (hour() == 1 && minute() < 12) readyForSunsetUpdate = true;
   displayTemp();
   displayWeather();
   readyForWeatherUpdate = false;
@@ -460,9 +587,13 @@ void displayWeather() {
   t0.setText(wunderground.getWeatherText().c_str());
   t1.setText(wunderground.getWindSpeed().c_str());
   t2.setText(wunderground.getFeelsLike().c_str());
-  t3.setText(wunderground.getHumidity().c_str());
+  t3.setText(wunderground.getHumidity().substring(0,13).c_str());
   String modified_IconText = "";
-  if (!isDay(TimeClient.getHours().toInt(),wunderground.getSunriseTime().toInt(),wunderground.getSunsetTime().toInt())) {
+  Serial.print("sunrise: ");
+  Serial.println(wunderground.getSunriseTime());
+  Serial.print("sunset: ");
+  Serial.println(wunderground.getSunsetTime());
+  if (!isDay(hour(),wunderground.getSunriseTime().toInt(),wunderground.getSunsetTime().toInt())) {
     modified_IconText = "nt_" + wunderground.getTodayIconText();
   }
   else modified_IconText = wunderground.getTodayIconText();
@@ -526,41 +657,35 @@ void displayForecast() {
 void ISRwatchdog() {
   WDTCount++;
   if (WDTCount == 25) ESP.reset();
-  move_on = digitalRead(PIRPin);
 }
 
 
-void lightcontrol() {
+void light_off() {
   yield();
-  /*
-  Serial.println (move_on);
-  if (TimeClient.getHours().toInt() < 6 && TimeClient.getHours().toInt() > 0 && lights_on || !move_on){
-    digitalWrite(LIGHTPIN, LOW);
-    for (int i = 0;i < maxInUse;i++){
-      lc.shutdown(i,true);
-      delay(100);
-    }
-    String dim = "dim=0";  
-    nexSerial.print("dim=0");
-    nexSerial.write(0xff);
-    nexSerial.write(0xff);
-    nexSerial.write(0xff);
-    lights_on = false;
+  for (int i = 0;i < maxInUse;i++){
+    lc.shutdown(i,true);
+    wait(100);
+   }
+  nexSerial.print("dim=0");
+  nexSerial.write(0xff);
+  nexSerial.write(0xff);
+  nexSerial.write(0xff);
+  lights_on = false;
   }
-  else if (TimeClient.getHours().toInt() > 5 && lights_on == false && move_on) {
-    digitalWrite(LIGHTPIN, HIGH);
-    for (int i = 0;i < maxInUse;i++){
-      lc.shutdown(i,false);
-      delay(100);
-    }
-    nexSerial.print("dim=80");
-    nexSerial.write(0xff);
-    nexSerial.write(0xff);
-    nexSerial.write(0xff);
-    lights_on = true;
+
+
+void light_on() {
+  for (int i = 0;i < maxInUse;i++){
+    lc.shutdown(i,false);
+    wait(100);
   }
-  */
-}
+  nexSerial.print("dim=80");
+  nexSerial.write(0xff);
+  nexSerial.write(0xff);
+  nexSerial.write(0xff);
+  lights_on = true;
+  }
+
 
 void updateSunset() {
   wunderground.updateAstronomy(WUNDERGRROUND_API_KEY, WUNDERGRROUND_LANGUAGE, WUNDERGROUND_COUNTRY, WUNDERGROUND_CITY);
@@ -569,5 +694,30 @@ void updateSunset() {
 
 bool isDay (int current, int sun_rise, int sun_set) {
 return (current < 23 && current > 4 && current < sun_set && current > sun_rise);
+}
+
+
+//{"idx":29,"nvalue":0,"svalue":"123"}
+void publish(int idx, int nvalue, int svalue){ 
+  char output[130];
+  snprintf_P(output, sizeof(output), PSTR("{\"idx\":%d,\"nvalue\":%d,\"svalue\":\"%d\"}"),idx,nvalue,svalue);
+  client.publish(OutTopic,output);
+  String log_output;
+  log_output = output;
+  syslog.logf(LOG_INFO, "%s", log_output.c_str());
+}
+
+
+void Publish_Status() {
+  publish(ZVV_IDX,lights_on,0);
+  old_lights_on = lights_on; 
+}
+
+
+void wait (int ms) {
+  for(long i = 0;i <= ms * 30000; i++) asm ( "nop \n" ); //80kHz Wemos D1
+  ArduinoOTA.handle();
+  yield();
+  WDTCount = 0;
 }
 
